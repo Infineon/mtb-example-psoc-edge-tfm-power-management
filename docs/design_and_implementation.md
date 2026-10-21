@@ -1,0 +1,83 @@
+[Click here](../README.md) to view the README.
+
+## Design and implementation
+
+The design of this application is minimalistic to get started with code examples on Infineon's PSOC&trade; Edge MCU devices. This code example demonstrates how to use Trusted Firmware-M (TF-M) with FreeRTOS and configure FreeRTOS to enter DeepSleep when Idle on the PSOC&trade; Edge MCU. It has a dual-CPU three-project structure to develop code for the CM33 and CM55 cores. The CM33 core has two separate projects for the secure processing environment (SPE) and non-secure processing environment (NSPE). A project folder consists of various subfolders, each denoting a specific aspect of the project. The three project folders are as follows:
+
+**Table 1. Application projects**
+
+Project | Description
+--------|------------------------
+*proj_cm33_s* | Project for CM33 SPE; implemented by TF-M
+*proj_cm33_ns* | Project for CM33 NSPE
+*proj_cm55* | Project for CM55 NSPE
+
+<br>
+
+Trusted Firmware-M (TF-M) implements the SPE for Armv8-M and Armv8.1-M architectures (for example, the Cortex&reg;-M33, Cortex&reg;-M23, Cortex&reg;-M55, and Cortex&reg;-M85 processors), and dual-core platforms. TF-M serves as the reference implementation of the platform security architecture and aligns with PSA-certified guidelines, enabling chips, real-time operating systems, and devices to become PSA certified. For more details, see the [Trusted Firmware-M Documentation](https://tf-m-user-guide.trustedfirmware.org/)
+
+The Extended Boot launches the Edge Protect Bootloader (EPB) from RRAM. The EPB authenticates the CM33 secure, CM33 non-secure, and CM55 projects, which are stored in the external flash, and then launches the CM33 secure application from the external flash. The CM33 secure project contains the TF-M. TF-M is available in source code format as a library in the *mtb_shared* directory. The CM33 secure application does not contain any source files of its own; instead, it includes the TF-M library from *mtb-shared* to build the TF-M firmware. For more information on TF-M library and services, see AN240096 ? Getting started with Trusted Firmware-M (TF-M) on PSOC&trade; Edge.
+
+The TF-M's secure partition manager (SPM) creates the secure SPE and NSPE using TrustZone, MPU, MPC, and PPC protection units. TF-M offers several services which can be used by the non-secure application. These services are placed in independent partitions. The following partitions are initialized by the SPM: 
+- Internal trusted storage (ITS)
+- Protected storage (PS)
+- Crypto
+- Initial attestation
+- Platform
+- Power Manager (a custom partition, built on `KIT_PSE84_EVAL_EPC4` only)
+
+### Wake-up source handling
+
+On Edge Protect Category 4 (EPC4) MCUs, the NSPE interrupts are masked when the device is in SPE. The device is configured to enter DeepSleep inside the SPE, so only secure interrupts can wake it up. Therefore, on `KIT_PSE84_EVAL_EPC4` the USER BTN1 (GPIO) interrupt is configured as a secure interrupt and managed in the SPE by the **Power Manager** partition.
+
+On Edge Protect Category 2 (EPC2) MCUs, this restriction does not apply. On `KIT_PSE84_EVAL_EPC2` the non-secure application registers its own GPIO interrupt handler for USER BTN1 and the Power Manager partition is not built.
+
+The target-specific code paths in *proj_cm33_ns/main.c* are selected with `#if defined(TARGET_KIT_PSE84_EVAL_EPC4)`.
+
+**Table 2. Per-target wake-up behavior**
+
+Target | USER BTN1 owner | Idle exit condition
+-------|-----------------|--------------------
+`KIT_PSE84_EVAL_EPC2` | NSPE `gpio_isr_handler()` | USER BTN1 press or 10 second timeout
+`KIT_PSE84_EVAL_EPC4` | SPE **Power Manager** partition (FLIH) | USER BTN1 press only
+
+### Power Manager partition (EPC4 only)
+
+**Power Manager** is an Application ROT TF-M custom partition implemented using the Secure Function (SFN) model. It enables the GPIO secure interrupt to detect the **USER BTN1** button press, remembers the wake-up source, and provides the following service APIs to the NSPE.
+
+**Table 3. Power Manager partition service APIs**
+
+API | Description
+--------|------------------------
+`power_manager_clr_wakeup_src` | Clears the wakeup source
+`power_manager_get_wakeup_src` | Returns the wakeup source
+
+
+**Table 4. Power Manager partition files**
+
+File | Description
+--------|------------------------
+*power_manager.json* | Manifest file - Defines the format, services, and interrupts of the partition
+*power_manager_mngr.c* | Core file of the partition implements everything needed on SPE
+*power_manager_api.c* <br> *power_manager_api.h* | Provides secure aware APIs to NSPE
+*power_manager_defs.h* | Provides required definitions, used by both SPE and NSPE
+*power_manager_interrupts.c* | Provides init and handlers for interrupts owned by the partition. This file is part of the TF-M SPM and not the Power Manager partition itself
+*tfm_config.cmake* <br> *custom_top_level_manifest.json* | Common CMake and manifest-list files for all custom partitions, generated by the Edge Protect Configurator from *design.edgeprotect*. Currently includes only the Power Manager partition
+
+These files live under *templates/TARGET_KIT_PSE84_EVAL_EPC4/config/tfm_config/*. The equivalent folder is absent for `KIT_PSE84_EVAL_EPC2`, which disables the partition for that target.
+
+After initializing the partitions, TF-M launches the M33 NSPE project from the external flash, which initializes the M33 NSPE <-> M55 NSPE interface using the Secure Request Framework (SRF). It then enables the CM55 core using the `Cy_SysEnableCM55()` function and the CM55 core is subsequently put into Deep Sleep mode since it is not used in this code example. 
+
+The CM33 NS project makes calls to TF-M via the PSA APIs. In this code example, usage of logging and DeepSleep operations/APIs offered by the Platform TF-M partition are demonstrated, along with the operations offered by the custom **Power Manager** partition on EPC4 targets. On EPC2 targets, the CM33 non-secure application configures a GPIO interrupt to detect the USER BTN1 press. The application creates the following two tasks:
+
+**Table 5. Application Tasks**
+
+Task | Description
+--------|------------------------
+App state manager | Manages the Application state <br> **APP_STATE_ACTIVE** (20 seconds) - Resumes all Tasks. <br> **APP_STATE_IDLE** - Suspends all tasks
+Heart Beat | Blinks LED1 at 1 kHz in **APP_STATE_ACTIVE**
+
+
+The tickless idle functionality of FreeRTOS is configured to make the device enter DeepSleep when idle. When all tasks are suspended in **APP_STATE_IDLE**, the device automatically enters DeepSleep. This is indicated by LED2. You can wake up the device manually by pressing USER_BTN1, which transitions the application to **APP_STATE_ACTIVE**. On `KIT_PSE84_EVAL_EPC2`, the device also wakes up automatically after 10 seconds.
+
+<br>
